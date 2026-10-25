@@ -1,0 +1,44 @@
+# Auto Review profile layer: coexistence mode.
+#
+# This package contributes its own `auto-review` permission preset (declared in
+# the `permission` row config below) and its own escalation reviewer, while the
+# shipped `@deepseek-ai/dsh-experimental-auto-review` row STAYS ENABLED.
+#
+# The shipped row must not be disabled: `auto` is a RESERVED preset id
+# (`dsh-permission-presets` refuses to compose it from row config), and the
+# reserved state exists only while the shipped row is mounted. Sessions whose
+# last `permission/preset` event is `auto` cannot cold-open without it — they
+# fail resolution at attach and the UI shows them permanently unavailable.
+#
+# Why a separate preset rather than the shipped `auto`: the shipped preset's
+# sandbox/approval bundle is `AUTO_PRESET_SPEC`, a private constant, so its
+# sandbox cannot be restated from outside. Declaring our own preset makes the
+# workspace-write contract plain configuration.
+#
+# The two features do not collide: the shipped row owns the reserved `auto`
+# state and its reviewer; this package owns the `auto-review` preset and its
+# reviewer (it never registers `auto`). Each preset routes to its own reviewer.
+# If this package's plugin fails, the `auto-review` preset still selects
+# workspace-write + ask and approvals fall through to the human answerer.
+- insert:
+    - id: auto-review-ww
+      name: dsh-auto-review-ww
+# A patch replaces the targeted row's whole `config`, so every shipped preset is
+# restated here alongside the new one.
+- id: permission
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+      auto-review:
+        sandbox: workspace-write
+        approval: ask
+        name: Auto review
+        description: "Workspace-write sandbox: ordinary project work runs unreviewed; only an escalation beyond the workspace is reviewed by the current agent's model."

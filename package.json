@@ -1,0 +1,40 @@
+{
+  "name": "dsh-auto-review-ww",
+  "version": "1.0.0",
+  "description": "Sandbox-first Auto Review permission mode for DeepSeek Harness: a workspace-write preset plus an escalation-only reviewer that never falls back to human approval and returns every refusal reason to the agent",
+  "type": "module",
+  "main": "lib/index.js",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Andy-Xie-1145/dsh-auto-review-ww.git"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "auto-review",
+    "permissions",
+    "sandbox",
+    "workspace-write"
+  ],
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "cordis.patch.yml",
+    "selftest.mjs",
+    "README.md",
+    "README_ZH.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": "0.2.0-rc.2"
+  }
+}
