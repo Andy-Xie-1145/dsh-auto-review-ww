@@ -93,6 +93,20 @@ text is byte-stable for identical refusals, so repeated denials cost nothing ext
 never invalidate the prompt cache. Reviewer failures publish a stable explanation too
 ("reviewer outage, not a risk verdict") instead of refusing silently.
 
+## Verdict reuse, review timeout, and raw-output logging
+
+- **Verdict reuse:** an identical escalation (same session, tool and justification)
+  inside the reuse window returns the reviewed outcome without another model call —
+  retry loops and repeated maintenance commands pay once. Window:
+  `AUTO_REVIEW_WW_VERDICT_TTL_MS` (default 30 minutes).
+- **Review timeout:** a single review is hard-capped
+  (`AUTO_REVIEW_WW_REVIEW_TIMEOUT_MS`, default 120 s). On timeout the escalation fails
+  closed with a published reason instead of blocking the turn for minutes.
+- **Raw-output logging:** every review logs its route, payload size and the model's
+  verbatim output (plus a reasoning head) to the host console
+  (`reviewer route <provider>/<model> payload=... raw output ...`), so "did it actually
+  call the model?" is always answerable from logs. Set
+  `AUTO_REVIEW_WW_DEBUG_LOG=<file>` for a complete evidence file.
 ## Compatibility notes
 
 - Declared host range: `0.2.0-rc.2 || >=0.2.1-rc.0 <0.4.0-0` (covers 0.2.0-rc.2, every 0.2.1-rc+/release through 0.2.5+ and the 0.3 line; validated with node-semver in both strict and includePrerelease modes).`n  The plugin declares no private host constants and no host imports, so any host that`n  keeps the permission-row config shape works; run `node selftest.mjs` after upgrading.`n  The optional sandbox patch self-guards by exact line match and refuses to patch a`n  changed host.

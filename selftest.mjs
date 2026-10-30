@@ -174,6 +174,29 @@ const next = async () => "NEXT";
 	check("allow publishes no explanation", contextTextFor(captured, activeRequest.agent), "");
 }
 {
+	// Verdict cache: an identical escalation reuses the reviewed outcome.
+	const agent = makeAgent();
+	const captured = mount({ module, preset: "auto-review", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" });
+	const activeRequest = requestFor(agent);
+	check("cache miss -> allowed-once", await captured.handler(activeRequest, next), "allowed-once");
+	const before = captured.streamOptions.length;
+	check("cache hit -> allowed-once", await captured.handler(activeRequest, next), "allowed-once");
+	check("cache hit made no extra model call", captured.streamOptions.length - before, 0);
+}
+{
+	// Review timeout: a hung upstream must fail closed quickly, with a reason.
+	process.env.AUTO_REVIEW_WW_REVIEW_TIMEOUT_MS = "80";
+	try {
+		const agent = makeAgent();
+		const captured = mount({ module, preset: "auto-review", streamHangs: true });
+		const activeRequest = requestFor(agent);
+		const t0 = Date.now();
+		check("hung review -> rejected (fail closed)", await captured.handler(activeRequest, next), "rejected");
+		const mailed = globalThis[Symbol.for("auto-review-ww.denials")]?.get(`${agent.session.id}:write`) ?? "";
+		checkThat("timeout reason reaches the tool-return mailbox", mailed.includes("review exceeded") || mailed.includes("reviewer outage"), mailed);
+		checkThat("timeout enforced within 5s", Date.now() - t0 < 5000, `took ${Date.now() - t0}ms`);
+	} finally { delete process.env.AUTO_REVIEW_WW_REVIEW_TIMEOUT_MS; }
+}{
 	const captured = mount({ module, preset: "auto-review", decision: "{\"risk\":\"high\",\"decision\":\"deny\",\"reason\":\"the payload would exfiltrate credentials\"}" });
 	const activeRequest = requestFor();
 	check("deny -> rejected", await captured.handler(activeRequest, next), "rejected");
@@ -200,6 +223,29 @@ const next = async () => "NEXT";
 
 // --- tool-return reason mailbox (consumed by the optional sandbox patch) -----
 {
+	// Verdict cache: an identical escalation reuses the reviewed outcome.
+	const agent = makeAgent();
+	const captured = mount({ module, preset: "auto-review", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" });
+	const activeRequest = requestFor(agent);
+	check("cache miss -> allowed-once", await captured.handler(activeRequest, next), "allowed-once");
+	const before = captured.streamOptions.length;
+	check("cache hit -> allowed-once", await captured.handler(activeRequest, next), "allowed-once");
+	check("cache hit made no extra model call", captured.streamOptions.length - before, 0);
+}
+{
+	// Review timeout: a hung upstream must fail closed quickly, with a reason.
+	process.env.AUTO_REVIEW_WW_REVIEW_TIMEOUT_MS = "80";
+	try {
+		const agent = makeAgent();
+		const captured = mount({ module, preset: "auto-review", streamHangs: true });
+		const activeRequest = requestFor(agent);
+		const t0 = Date.now();
+		check("hung review -> rejected (fail closed)", await captured.handler(activeRequest, next), "rejected");
+		const mailed = globalThis[Symbol.for("auto-review-ww.denials")]?.get(`${agent.session.id}:write`) ?? "";
+		checkThat("timeout reason reaches the tool-return mailbox", mailed.includes("review exceeded") || mailed.includes("reviewer outage"), mailed);
+		checkThat("timeout enforced within 5s", Date.now() - t0 < 5000, `took ${Date.now() - t0}ms`);
+	} finally { delete process.env.AUTO_REVIEW_WW_REVIEW_TIMEOUT_MS; }
+}{
 	const captured = mount({ module, preset: "auto-review", decision: "{\"risk\":\"high\",\"decision\":\"deny\",\"reason\":\"the payload would exfiltrate credentials\"}" });
 	const activeRequest = requestFor();
 	check("deny -> rejected (mailbox)", await captured.handler(activeRequest, next), "rejected");
