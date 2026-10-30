@@ -2,3 +2,4 @@ node_modules/
 *.log
 .ar-*
 .DS_Store
+reviewer.log

@@ -97,7 +97,7 @@ JSON 协议作答 `{"risk":"low|medium|high","decision":"allow|deny","reason":".
 - **评审超时**:单次评审硬封顶(`AUTO_REVIEW_WW_REVIEW_TIMEOUT_MS`,默认 120 秒)。
   超时后该提权 fail closed 并发布原因,而不是让整个任务干等几分钟。
 - **原始响应日志**:每次评审都会把路由、载荷大小与模型的**逐字输出**(附 reasoning
-  开头)写进宿主控制台(`reviewer route <provider>/<model> payload=... raw output ...`),
+  开头)写入插件目录下的 `reviewer.log`(JSONL:路由、载荷大小、模型逐字输出与 reasoning 开头,每次评审一行),
   "到底调没调模型"永远可以从日志证实。设置 `AUTO_REVIEW_WW_DEBUG_LOG=<文件>` 可获得
   完整证据文件。
 ## 兼容性说明
