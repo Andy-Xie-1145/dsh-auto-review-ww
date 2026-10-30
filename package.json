@@ -24,6 +24,7 @@
   },
   "files": [
     "lib/index.js",
+    "tools/patch-sandbox-rejection.mjs",
     "cordis.patch.yml",
     "selftest.mjs",
     "README.md",

@@ -198,6 +198,15 @@ const next = async () => "NEXT";
 	check("non-Auto session runs no review", captured.streamOptions.length, 0);
 }
 
+// --- tool-return reason mailbox (consumed by the optional sandbox patch) -----
+{
+	const captured = mount({ module, preset: "auto-review", decision: "{\"risk\":\"high\",\"decision\":\"deny\",\"reason\":\"the payload would exfiltrate credentials\"}" });
+	const activeRequest = requestFor();
+	check("deny -> rejected (mailbox)", await captured.handler(activeRequest, next), "rejected");
+	const mailed = globalThis[Symbol.for("auto-review-ww.denials")]?.get(`${activeRequest.agent.session.id}:write`) ?? "";
+	checkThat("denial reason mailed to the tool-return registry", mailed.includes("exfiltrate credentials"), mailed);
+}
+
 // --- the new reason channel -------------------------------------------------
 {
 	const captured = mount({ module, preset: "auto-review", decision: "{\"risk\":\"medium\",\"decision\":\"deny\",\"reason\":\"the target file is outside the workspace and no current instruction authorizes writing C:\\\\outside\\\\target.txt\"}" });

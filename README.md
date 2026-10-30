@@ -103,6 +103,28 @@ never invalidate the prompt cache. Reviewer failures publish a stable explanatio
 - Zero runtime dependencies: all host helpers are inlined, so `link:`/junction installs
   resolve cleanly.
 
+## Optional: denial reason in the tool return (experimental host patch)
+
+The host composes an escalation rejection inside `@deepseek-ai/dsh-sandbox` with a
+fixed template ("the user rejected escalating this ...") and the approval protocol
+carries no reason field, so a plugin cannot alter that text on its own. This repo
+therefore ships an optional, single-line host patch:
+
+```sh
+node tools/patch-sandbox-rejection.mjs            # apply (idempotent)
+node tools/patch-sandbox-rejection.mjs --revert   # restore the stock line
+```
+
+When patched, a rejection made by this reviewer reads:
+
+```text
+the Auto Reviewer denied escalating this <subject> to "<mode>": <reason> ...
+```
+
+Unpatched hosts are unaffected (the registry is simply never read), unattended
+semantics are unchanged, and the patch must be re-applied after each Harness
+upgrade. Without the patch the reason still reaches the agent through the
+context channel.
 ## Production lessons (each one is a regression test)
 
 1. **Never freeze an `AbortSignal`.** `deepFreeze(options)` used to freeze the composed

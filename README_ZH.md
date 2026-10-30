@@ -98,6 +98,25 @@ JSON 协议作答 `{"risk":"low|medium|high","decision":"allow|deny","reason":".
   `auto`)。
 - 零运行时依赖:宿主辅助函数全部内联,`link:`/junction 安装方式解析干净。
 
+## 可选:把拒绝原因写进工具返回(实验性宿主补丁)
+
+宿主在 `@deepseek-ai/dsh-sandbox` 内部用固定模板拼装提权拒绝文本("the user
+rejected escalating this ..."),而审批协议本身不携带理由字段 —— 插件无法凭自己
+改写这句话。因此本仓库提供一个可选的单行宿主补丁:
+
+```sh
+node tools/patch-sandbox-rejection.mjs            # 应用(幂等)
+node tools/patch-sandbox-rejection.mjs --revert   # 恢复原始行
+```
+
+打补丁后,本审查器的拒绝会读作:
+
+```text
+the Auto Reviewer denied escalating this <subject> to "<mode>": <reason> ...
+```
+
+未打补丁的宿主完全不受影响(注册表根本不会被读取),无人值守语义不变;每次
+Harness 升级后需要重新应用。不打补丁时,拒绝原因依然通过上下文通道到达 agent。
 ## 生产教训(每条都是一个回归测试)
 
 1. **永远不要冻结 `AbortSignal`。** `deepFreeze(options)` 曾把组合信号一起冻结,下游
