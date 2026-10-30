@@ -5,7 +5,7 @@
 # dsh-auto-review-ww
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-0.2.0--rc.2-202724)
+![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-0.2.x%2B-202724)
 
 **Sandbox-first Auto Review for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).**
 Routine work runs unreviewed inside the real `workspace-write` sandbox; only an escalation
@@ -95,8 +95,7 @@ never invalidate the prompt cache. Reviewer failures publish a stable explanatio
 
 ## Compatibility notes
 
-- Compatible host: `0.2.0-rc.2`. The plugin declares no private host constants, so minor
-  host updates that keep the permission-row config shape will keep working.
+- Declared host range: `>=0.2.0-rc.2 <0.4` (covered: 0.2.x through 0.2.5+ and the 0.3 line).`n  The plugin declares no private host constants and no host imports, so any host that`n  keeps the permission-row config shape works; run `node selftest.mjs` after upgrading.`n  The optional sandbox patch self-guards by exact line match and refuses to patch a`n  changed host.
 - The official `@deepseek-ai/dsh-experimental-auto-review` row stays **enabled**. Two
   preset entries appear in the picker: the official `auto` (with the EXP badge) and this
   package's `auto-review` (plain entry — the client only decorates `auto`).
