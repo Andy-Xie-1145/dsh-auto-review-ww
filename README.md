@@ -64,8 +64,9 @@ dsh plugin --profile web add github:Andy-Xie-1145/dsh-auto-review-ww
 ```
 
 Then fully restart Harness and pick the **Auto review** preset (plain entry — the client
-only decorates the official `auto` value). Works with any model route; the reviewer rides
-the session's own provider and model.
+only decorates the official `auto` value). Works with any model route; by default the
+reviewer rides the session's own provider and model, and an optional decision model can
+take over the cheap path (see below).
 
 ## How the reviewer decides
 
@@ -92,6 +93,123 @@ Denial reasons travel back on a dedicated channel: an append-only context block 
 text is byte-stable for identical refusals, so repeated denials cost nothing extra and
 never invalidate the prompt cache. Reviewer failures publish a stable explanation too
 ("reviewer outage, not a risk verdict") instead of refusing silently.
+
+## Decision-model reviewer (optional, beta)
+
+A **decision model** is a calibrated classifier, not a chat model: you send one JSON
+state and a set of named questions, and it returns typed answers with probabilities
+instead of prose. Two wire protocols are supported, because they are genuinely
+different services:
+
+| API id | Service | Endpoint | Yes/no question |
+| --- | --- | --- | --- |
+| `typesafe-system-one` | [TypeSafe System One](https://docs.typesafe.ai/concepts/system-one) (Jev) | `POST <baseUrl>/systemone` | `type: "noul"` |
+| `openai-decisions` | [OpenAI Decisions](https://developers.openai.com/api/docs/guides/decisions) (GPT-6 Luna) | `POST <baseUrl>/decisions` | `type: "predicate"` |
+
+Both are far cheaper per review than a reasoning model (Jev is listed at $42 per
+billion input tokens and GPT-6 Luna at $0.10 per million — roughly $0.0006 and $0.0015
+for a 15k-token review), so the decision reviewer runs first and escalates only what it
+cannot settle. In practice the cheap path covers allows; a medium denial pays one chat
+review, which is exactly where a real reason matters.
+
+### How it decides
+
+The same frozen snapshot becomes the model's **state** (`cwd`, `project_instructions`,
+`history`, `pending_action`), and three questions carry the whole decision:
+
+| Question | Type | Meaning |
+| --- | --- | --- |
+| `authorized` | yes/no | is this exact call, at this target and scope, work the session's human commissioned? |
+| `risk` | choice `low`/`medium`/`high` | how much can go wrong if the call is wrong? |
+| `objection` | choice | when it must not run, which objection applies? |
+
+The `objection` pick becomes the agent-facing denial reason (a classifier cannot write
+one itself), joined with the calibrated probability. The policy preserves every safety
+invariant of the chat reviewer:
+
+- `high` risk always denies, even at a 99 % authorization probability;
+- an allow is only `low` or `medium`; a denial is only `medium` or `high`;
+- a probability between the deny and allow thresholds is **never** an allow — it
+  escalates to the chat reviewer (or fails closed, see `escalate`).
+
+### The two weaknesses of decision models, handled
+
+Decision models were not built to replace a reviewer, and the two real limits are
+mitigated in code rather than left to the prompt:
+
+| Weakness | Mitigation |
+| --- | --- |
+| **Less context** (Jev: 64k per request, 32k per question) | the state is budgeted and the oldest history is shed first; if anything had to be shed, the verdict is *not* trusted — the call goes to the chat reviewer, which reads the full session (`escalateOnTruncation`, default on) |
+| **Cannot explain a denial** | a classifier can pick an objection category but cannot argue it, so a `medium` denial is confirmed by the chat reviewer and the agent receives its substantive reason (`confirmDenials`, default on); the chat reviewer can also override a wrong cheap denial, while a `high` denial stays final and is never overridden |
+
+### Configuration
+
+Add a `config` block to the plugin row in this package's `cordis.patch.yml`
+(`AUTO_REVIEW_WW_*` environment variables override it for operations without a restart):
+
+```yaml
+- insert:
+    - id: auto-review-ww
+      name: dsh-auto-review-ww
+      config:
+        mode: auto                    # auto | chat | decision
+        decision:
+          api: typesafe-system-one    # typesafe-system-one | openai-decisions
+          model: jev-latest           # default: jev-latest / gpt-6-luna
+          apiKeyEnv: TYPESAFE_API_KEY # or OPENAI_API_KEY
+          allowThreshold: 0.85        # allow at or above this probability
+          denyThreshold: 0.20         # deny at or below this probability
+          escalate: chat              # chat | deny (what an uncertain verdict does)
+          confirmDenials: true        # medium denials get the chat reviewer's reason
+          escalateOnTruncation: true  # a shed-history verdict is not trusted
+          maxStateChars: 90000        # state budget (Jev); GPT-6 Luna defaults to 600000
+          timeoutMs: 20000            # decision call timeout, before escalation
+```
+
+`mode: chat` is the original reviewer, unchanged and still the default. `mode: auto` uses the decision reviewer only when an API key is present,
+so an existing installation keeps its current behavior until a key is configured.
+`mode: decision` makes the decision model mandatory and logs a configuration warning
+when the key is missing. API keys are never stored in this repo: set them in the
+environment (`TYPESAFE_API_KEY` / `OPENAI_API_KEY`, or `AUTO_REVIEW_WW_DECISION_API_KEY`).
+
+Other environment overrides: `AUTO_REVIEW_WW_MODE`, `AUTO_REVIEW_WW_DECISION_API`,
+`AUTO_REVIEW_WW_DECISION_MODEL`, `AUTO_REVIEW_WW_DECISION_BASE_URL`,
+`AUTO_REVIEW_WW_DECISION_API_KEY`, `AUTO_REVIEW_WW_DECISION_ALLOW_THRESHOLD`,
+`AUTO_REVIEW_WW_DECISION_DENY_THRESHOLD`, `AUTO_REVIEW_WW_DECISION_ESCALATE`,
+`AUTO_REVIEW_WW_DECISION_CONFIRM_DENIALS`,
+`AUTO_REVIEW_WW_DECISION_ESCALATE_ON_TRUNCATION`,
+`AUTO_REVIEW_WW_DECISION_TIMEOUT_MS`, `AUTO_REVIEW_WW_DECISION_MAX_STATE_CHARS`.
+
+### Validate the setup
+
+```sh
+node tools/probe-decision.mjs                       # TypeSafe, key from TYPESAFE_API_KEY
+node tools/probe-decision.mjs --api openai-decisions
+node tools/probe-decision.mjs --task "Delete the stale build cache"
+```
+
+The probe sends one review-shaped snapshot through the plugin's own transport and prints
+the verdict, the calibrated probability and the token usage — or the exact upstream
+error. It is the fastest way to prove a key, model id or proxy base URL before trusting
+it with real escalations.
+
+### Failure and limits
+
+- A decision call that fails (network, HTTP error, malformed answer envelope) is logged
+  as `decision-failure` and escalated to the chat reviewer; with `escalate: deny` it
+  takes the documented fail-closed outage path instead. Aborts are never mistaken for
+  failures.
+- Decision models have smaller contexts than chat models (Jev: 64k per request, 32k per
+  question). The state is budgeted by `maxStateChars` (default 90,000 characters ≈ 27k
+  tokens for Jev, 600,000 for GPT-6 Luna) and the **oldest** history entries are shed
+  first; the drop count is recorded in `reviewer.log`. Project instructions and the
+  pending action are never dropped. If anything was shed, the chat reviewer decides
+  instead (`escalateOnTruncation`), so a partial-context verdict is never trusted.
+- The denial reason is a category text plus a probability, not a bespoke sentence. That
+  is why a `medium` denial is confirmed by the chat reviewer by default
+  (`confirmDenials`); set it to `false` for the cheapest possible path.
+- OpenAI's Decisions endpoint needs a real API key; "Sign in with ChatGPT" OAuth tokens
+  are rejected by that route. Decision models also ignore `temperature`.
 
 ## Verdict reuse, review timeout, and raw-output logging
 
@@ -162,8 +280,12 @@ context channel.
 node selftest.mjs
 ```
 
-Thirty checks cover decision mapping, escalation gating, signal integrity, card-answer
-retention, reason publication, fail-closed behavior, and unload semantics.
+One hundred twelve checks cover decision mapping, escalation gating, signal integrity,
+card-answer retention, reason publication, fail-closed behavior, unload semantics,
+both decision-model wire protocols — URL, auth header, `noul`/`predicate` question shape,
+JSON-text state, state budget with oldest-history shedding, threshold policy, escalation,
+denial confirmation and override, truncation escalation — driven by a recording `fetch`
+instead of the network, and the probe tool.
 
 ## License
 

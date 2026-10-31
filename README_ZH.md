@@ -62,7 +62,8 @@ dsh plugin --profile web add github:Andy-Xie-1145/dsh-auto-review-ww
 ```
 
 然后完整重启 Harness,选择 **Auto review** 预设(普通条目 —— 客户端只对官方 `auto`
-值做 EXP 徽章特判)。任意模型路由可用:审查器跟随会话自己的 provider 和 model。
+值做 EXP 徽章特判)。任意模型路由可用:默认审查器跟随会话自己的 provider 和 model;
+可选的决策模型可以接管这条廉价路径(见下文)。
 
 ## 审查器如何判断
 
@@ -88,6 +89,116 @@ JSON 协议作答 `{"risk":"low|medium|high","decision":"allow|deny","reason":".
 拒绝原因通过专用通道回传:一个 append-only 上下文块,相同拒绝的字节完全稳定 ——
 重复拒绝不产生额外成本,也绝不破坏提示缓存。审查器自身故障同样发布稳定说明
 ("审查器故障,非风险裁决"),而不是无声拒绝。
+
+## 决策模型审查器(可选,Beta)
+
+**决策模型**(decision model)是校准过的分类器,不是聊天模型:给它一段 JSON 状态和
+一组命名问题,它返回带概率的类型化答案,而不是生成文本。本插件支持两种协议 ——
+它们是完全不同的服务:
+
+| API id | 服务 | 端点 | 是/否问题类型 |
+| --- | --- | --- | --- |
+| `typesafe-system-one` | [TypeSafe System One](https://docs.typesafe.ai/concepts/system-one)(Jev) | `POST <baseUrl>/systemone` | `type: "noul"` |
+| `openai-decisions` | [OpenAI Decisions](https://developers.openai.com/api/docs/guides/decisions)(GPT-6 Luna) | `POST <baseUrl>/decisions` | `type: "predicate"` |
+
+两者单次评审成本都远低于推理模型(目录价:Jev $42 / 十亿输入 token,GPT-6 Luna
+$0.10 / 百万 —— 一次 1.5 万 token 的评审分别约 $0.0006 与 $0.0015),因此决策审查器
+先跑,只把它定不下来的调用升级给聊天审查器。实际效果是:放行走廉价路径;`medium`
+拒绝会付一次聊天评审 —— 而那正是"理由"最要紧的地方。
+
+### 它如何判断
+
+同一份冻结快照成为模型的 **state**(`cwd`、`project_instructions`、`history`、
+`pending_action`),三个问题承载整个决策:
+
+| 问题 | 类型 | 含义 |
+| --- | --- | --- |
+| `authorized` | 是/否 | 这个精确的调用(目标与范围)是否属于本会话人类委托的工作? |
+| `risk` | 选择 `low`/`medium`/`high` | 如果判断错了,最坏会造成多大破坏? |
+| `objection` | 选择 | 不该执行时,最强反对理由是哪一类? |
+
+`objection` 的选项会变成面向 agent 的拒绝理由(分类器自己写不出句子),并与校准概率
+一起呈现。策略保留聊天审查器的全部安全不变量:
+
+- `high` 风险永远拒绝,即使授权概率高达 99%;
+- allow 只允许 `low`/`medium`,deny 只允许 `medium`/`high`;
+- 概率落在 deny 与 allow 两个阈值之间时**绝不**放行 —— 升级给聊天审查器(或
+  按 `escalate` 配置 fail closed)。
+
+### 决策模型的两个硬伤,用机制兜底
+
+决策模型并不是为取代审查器而生的,它的两个真实局限在代码里兜底,而不是只写在
+提示词里:
+
+| 硬伤 | 兜底 |
+| --- | --- |
+| **上下文小**(Jev:每请求 64k、每问题 32k) | 状态有预算,超出时先丢弃最旧历史;只要发生过丢弃,该裁决就**不被信任** —— 转交能读完整会话的聊天审查器(`escalateOnTruncation`,默认开) |
+| **不会说明拒绝理由** | 分类器只能选一个反对类别、写不出论证,因此 `medium` 拒绝会由聊天审查器复核,agent 收到的是它给出的实质理由(`confirmDenials`,默认开);聊天审查器也能推翻错误的廉价拒绝,而 `high` 拒绝永远终局、不可推翻 |
+
+### 配置
+
+在本包的 `cordis.patch.yml` 中给插件行加 `config` 块(`AUTO_REVIEW_WW_*` 环境变量
+可覆盖,便于不重启处理运维):
+
+```yaml
+- insert:
+    - id: auto-review-ww
+      name: dsh-auto-review-ww
+      config:
+        mode: auto                    # auto | chat | decision
+        decision:
+          api: typesafe-system-one    # typesafe-system-one | openai-decisions
+          model: jev-latest           # 默认:jev-latest / gpt-6-luna
+          apiKeyEnv: TYPESAFE_API_KEY # 或 OPENAI_API_KEY
+          allowThreshold: 0.85        # 概率达到该值才放行
+          denyThreshold: 0.20         # 概率低于该值直接拒绝
+          escalate: chat              # chat | deny(不确定裁决的处置)
+          confirmDenials: true        # medium 拒绝由聊天审查器给出理由
+          escalateOnTruncation: true  # 发生过历史丢弃的裁决不被信任
+          maxStateChars: 90000        # 状态预算(Jev);GPT-6 Luna 默认 600000
+          timeoutMs: 20000            # 决策调用超时,之后升级
+```
+
+`mode: chat` 就是原始的聊天审查器,保持完全不变且仍是默认。`mode: auto` 只有在存在
+API key 时才启用决策审查器,因此已安装的实例在配置 key 之前行为完全不变;
+`mode: decision` 强制使用决策模型,缺 key 时在日志中报告配置问题。API key 绝不写入
+本仓库:放在环境变量里(`TYPESAFE_API_KEY` / `OPENAI_API_KEY`,或
+`AUTO_REVIEW_WW_DECISION_API_KEY`)。
+
+其他环境变量覆盖项:`AUTO_REVIEW_WW_MODE`、`AUTO_REVIEW_WW_DECISION_API`、
+`AUTO_REVIEW_WW_DECISION_MODEL`、`AUTO_REVIEW_WW_DECISION_BASE_URL`、
+`AUTO_REVIEW_WW_DECISION_API_KEY`、`AUTO_REVIEW_WW_DECISION_ALLOW_THRESHOLD`、
+`AUTO_REVIEW_WW_DECISION_DENY_THRESHOLD`、`AUTO_REVIEW_WW_DECISION_ESCALATE`、
+`AUTO_REVIEW_WW_DECISION_CONFIRM_DENIALS`、
+`AUTO_REVIEW_WW_DECISION_ESCALATE_ON_TRUNCATION`、
+`AUTO_REVIEW_WW_DECISION_TIMEOUT_MS`、`AUTO_REVIEW_WW_DECISION_MAX_STATE_CHARS`。
+
+### 验证配置
+
+```sh
+node tools/probe-decision.mjs                       # TypeSafe,key 取自 TYPESAFE_API_KEY
+node tools/probe-decision.mjs --api openai-decisions
+node tools/probe-decision.mjs --task "删除过期的构建缓存"
+```
+
+探针通过插件自己的传输层发送一份评审形状的快照,打印裁决、校准概率与 token 用量,
+或者确切的上游错误。在把某个 key、模型 id 或代理 base URL 交给真实提权之前,这是
+最快的验证方式。
+
+### 故障与局限
+
+- 决策调用失败(网络、HTTP 错误、答案信封格式错误)会记入 `decision-failure` 并升级
+  给聊天审查器;若 `escalate: deny`,则走既有的 fail-closed 故障路径。用户信号的中止
+  永远不会被误判为失败。
+- 决策模型的上下文比聊天模型小(Jev:每请求 64k、每问题 32k)。状态由
+  `maxStateChars` 限定预算(默认:Jev 90,000 字符 ≈ 27k token;GPT-6 Luna 600,000),
+  超出时**先丢弃最旧**的历史,丢弃条数写入 `reviewer.log`;项目指令与待审动作永不
+  丢弃。只要发生过丢弃,就改由聊天审查器裁决(`escalateOnTruncation`),部分上下文的
+  裁决永不被信任。
+- 拒绝理由由"分类文本 + 概率"组成,不是定制长句。因此 `medium` 拒绝默认由聊天审查器
+  复核并给出理由(`confirmDenials`);想要最省成本,可把它设为 `false`。
+- OpenAI 的 Decisions 端点需要真实 API key,"Sign in with ChatGPT" 的 OAuth 令牌会被
+  该路由拒绝。决策模型同样忽略 `temperature`。
 
 ## 裁决复用、评审超时与原始响应日志
 
@@ -147,8 +258,10 @@ Harness 升级后需要重新应用。不打补丁时,拒绝原因依然通过�
 node selftest.mjs
 ```
 
-三十项检查覆盖:决策映射、提权门控、信号完整性、卡片答复保留、原因发布、
-fail-closed 行为与卸载语义。
+一百一十二项检查覆盖:决策映射、提权门控、信号完整性、卡片答复保留、原因发布、
+fail-closed 行为、卸载语义、两种决策模型协议 —— URL、鉴权头、
+`noul`/`predicate` 问题形状、JSON 文本状态、带"丢弃最旧历史"的状态预算、阈值策略、
+升级、拒绝复核与推翻、截断升级 —— 全部由录制式 `fetch` 驱动,不触网,以及探针工具。
 
 ## 许可证
 

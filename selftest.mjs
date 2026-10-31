@@ -118,8 +118,78 @@ function mount(options) {
 		},
 		sessions: { list: () => options.sessions ?? [] }
 	};
-	options.module.apply(ctx, {});
+	options.module.apply(ctx, options.config ?? {});
 	return captured;
+}
+
+/** A fetch stand-in that records requests and answers with one canned body. */
+function mockFetch(respond, captured) {
+	return async (url, init) => {
+		captured.requests.push({ url: String(url), headers: init.headers, body: JSON.parse(init.body) });
+		const outcome = typeof respond === "function" ? respond(captured.requests.length) : respond;
+		if (outcome instanceof Error) throw outcome;
+		const status = outcome.status ?? 200;
+		const body = outcome.body ?? outcome;
+		return {
+			ok: status >= 200 && status < 300,
+			status,
+			async json() {
+				if (body instanceof Error) throw body;
+				return body;
+			},
+			async text() {
+				return JSON.stringify(body);
+			}
+		};
+	};
+}
+
+/** The two decision protocols' canned success envelopes. */
+const typesafeAnswers = (authorized, risk, objection, confidence = 0.9) => ({
+	model: "jev-latest",
+	answers: {
+		authorized: { type: "noul", noul: authorized },
+		risk: { type: "choice", choice: risk, confidence, probabilities: { low: 0.1, medium: 0.2, high: 0.7 } },
+		objection: { type: "choice", choice: objection, confidence, probabilities: { none: 0.1, unauthorized: 0.2, scope: 0.1, destructive: 0.2, exfiltration: 0.2, unclear: 0.2 } }
+	},
+	usage: { input_tokens: 120, output_tokens: 6 }
+});
+const openaiAnswers = (authorized, risk, objection) => ({
+	answers: [
+		{ name: "authorized", type: "predicate", probability: authorized },
+		{ name: "risk", type: "choice", choice: risk, confidence: 0.88, probabilities: { low: 0.1, medium: 0.2, high: 0.7 } },
+		{ name: "objection", type: "choice", choice: objection, confidence: 0.91, probabilities: { none: 0.1, unauthorized: 0.2, scope: 0.1, destructive: 0.2, exfiltration: 0.2, unclear: 0.2 } }
+	],
+	usage: { input_tokens: 90, output_tokens: 5 }
+});
+
+/** Mount with the decision reviewer enabled over a recording fetch. */
+function mountDecision(options, respond) {
+	const requests = [];
+	return {
+		requests,
+		captured: mount({
+			module,
+			...options,
+			config: {
+				mode: options.mode ?? "decision",
+				decision: {
+					api: options.api ?? "typesafe-system-one",
+					apiKey: options.apiKey ?? "test-key",
+					model: options.model,
+					baseUrl: options.baseUrl,
+					allowThreshold: options.allowThreshold,
+					denyThreshold: options.denyThreshold,
+					confirmDenials: options.confirmDenials,
+					escalateOnTruncation: options.escalateOnTruncation,
+					escalate: options.escalate,
+					maxStateChars: options.maxStateChars,
+					timeoutMs: options.timeoutMs,
+					fetch: mockFetch(respond, { requests })
+				}
+			}
+		})
+	};
 }
 
 /** The context text the plugin would contribute for one agent. */
@@ -316,6 +386,252 @@ const next = async () => "NEXT";
 	const captured = mount({ module, preset: "auto-review", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}", sessions: [live.session] });
 	await captured.disposers.at(-1)();
 	check("unload leaves preset selection alone", captured.setCalls.length, 0);
+}
+
+// --- decision-model reviewer (TypeSafe System One / OpenAI Decisions) --------
+{
+	// TypeSafe wire format: `{ model, state, questions }` to /v1/systemone, with a
+	// `noul` yes/no question, and a high-confidence allow decided without a chat call.
+	const { captured, requests } = mountDecision(
+		{ preset: "auto-review", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
+		typesafeAnswers(0.95, "low", "none")
+	);
+	const request = requestFor();
+	check("decision (TypeSafe): confident allow -> allowed-once", await captured.handler(request, next), "allowed-once");
+	check("decision (TypeSafe): exactly one HTTP request", requests.length, 1);
+	check("decision (TypeSafe): posts to the systemone endpoint", requests[0].url, "https://api.typesafe.ai/v1/systemone");
+	check("decision (TypeSafe): bearer authorization", requests[0].headers.authorization, "Bearer test-key");
+	check("decision (TypeSafe): model from config", requests[0].body.model, "jev-latest");
+	check("decision (TypeSafe): yes/no question uses noul", requests[0].body.questions.authorized.type, "noul");
+	check("decision (TypeSafe): risk question is a choice", requests[0].body.questions.risk.type, "choice");
+	check("decision (TypeSafe): state carries the pending action", requests[0].body.state.pending_action.name, "write");
+	checkThat("decision (TypeSafe): state carries the task history", Array.isArray(requests[0].body.state.history) && requests[0].body.state.history.some((entry) => JSON.stringify(entry).includes("Refactor the plugin loader")), JSON.stringify(requests[0].body.state.history).slice(0, 200));
+	check("decision (TypeSafe): no chat model call", captured.streamOptions.length, 0);
+}
+{
+	// OpenAI Decisions wire format: `{ model, input, questions }` to /v1/decisions,
+	// `questions` as an array, yes/no as `predicate`, state as JSON text. Denial
+	// confirmation is off here so the classifier's own reason is what travels.
+	const { captured, requests } = mountDecision(
+		{ preset: "auto-review", api: "openai-decisions", confirmDenials: false, decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
+		openaiAnswers(0.04, "medium", "scope")
+	);
+	const request = requestFor();
+	check("decision (OpenAI): confident deny -> rejected", await captured.handler(request, next), "rejected");
+	check("decision (OpenAI): posts to the decisions endpoint", requests[0].url, "https://api.openai.com/v1/decisions");
+	check("decision (OpenAI): questions are an array", Array.isArray(requests[0].body.questions), true);
+	check("decision (OpenAI): yes/no question is a predicate", requests[0].body.questions[0].type, "predicate");
+	checkThat("decision (OpenAI): predicate folds the meanings into instructions", String(requests[0].body.questions[0].instructions).includes("True means:"), String(requests[0].body.questions[0].instructions).slice(0, 60));
+	checkThat("decision (OpenAI): state is sent as JSON text", typeof requests[0].body.input === "string" && JSON.parse(requests[0].body.input).pending_action.name === "write", typeof requests[0].body.input);
+	const mailed = globalThis[Symbol.for("auto-review-ww.denials")]?.get(`${request.agent.session.id}:write`) ?? "";
+	checkThat("decision (OpenAI): the objection becomes the denial reason", mailed.includes("wider than this task authorizes") && mailed.includes("authorization probability at 4%"), mailed);
+	check("decision (OpenAI): confirmation off makes no chat call", captured.streamOptions.length, 0);
+}
+{
+	// Flaw 2 (no prose reason): a medium denial is confirmed by the chat reviewer,
+	// whose substantive objection is what the agent receives.
+	const { captured } = mountDecision(
+		{ preset: "auto-review", decision: "{\"risk\":\"medium\",\"decision\":\"deny\",\"reason\":\"the chat reviewer found the target outside the workspace and no instruction authorizes that path\"}" },
+		typesafeAnswers(0.08, "medium", "unauthorized")
+	);
+	const request = requestFor();
+	check("decision: medium denial is confirmed -> rejected", await captured.handler(request, next), "rejected");
+	check("decision: confirmation made exactly one chat call", captured.streamOptions.length, 1);
+	const mailed = globalThis[Symbol.for("auto-review-ww.denials")]?.get(`${request.agent.session.id}:write`) ?? "";
+	checkThat("decision: the confirmed denial carries the chat reviewer's reason", mailed.includes("the chat reviewer found the target outside the workspace"), mailed);
+}
+{
+	// The stronger reviewer may override a wrong cheap denial.
+	const { captured } = mountDecision(
+		{ preset: "auto-review", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
+		typesafeAnswers(0.08, "medium", "scope")
+	);
+	check("decision: chat reviewer overrides a wrong cheap denial", await captured.handler(requestFor(), next), "allowed-once");
+	check("decision: the override was a chat call", captured.streamOptions.length, 1);
+}
+{
+	// If confirmation fails, the cheap denial stands (fail closed) with its reason.
+	const { captured } = mountDecision(
+		{ preset: "auto-review", streamThrows: true, decision: "{\"risk\":\"medium\",\"decision\":\"deny\"}" },
+		typesafeAnswers(0.08, "medium", "scope")
+	);
+	const request = requestFor();
+	check("decision: failed confirmation keeps the denial", await captured.handler(request, next), "rejected");
+	const mailed = globalThis[Symbol.for("auto-review-ww.denials")]?.get(`${request.agent.session.id}:write`) ?? "";
+	checkThat("decision: failed confirmation keeps the classifier reason", mailed.includes("wider than this task authorizes"), mailed);
+}
+{
+	// A hard-risk class denies even when the authorization probability is high.
+	const { captured } = mountDecision({ preset: "auto-review" }, typesafeAnswers(0.99, "high", "exfiltration"));
+	const request = requestFor();
+	check("decision: high risk denies despite a high authorization probability", await captured.handler(request, next), "rejected");
+	check("decision: a high-risk denial is final (no confirmation call)", captured.streamOptions.length, 0);
+	const mailed = globalThis[Symbol.for("auto-review-ww.denials")]?.get(`${request.agent.session.id}:write`) ?? "";
+	checkThat("decision: high-risk denial explains the hard prohibition", mailed.includes("no session authorization can cover"), mailed);
+	const text = contextTextFor(captured, request.agent);
+	checkThat("decision: high-risk denial does not invite an authorization retry", !text.includes("the human must explicitly authorize"), text);
+}
+{
+	// Regression: truncation escalation must not reopen a high-risk denial. The
+	// chat stub answers allow, so a reordering bug shows up as a wrong allow.
+	const extra = [];
+	const extraNodes = [];
+	for (let index = 2; index < 202; index += 1) {
+		extra.push({ seq: index, type: "user/message", data: { source: { kind: "user", rpcId: `h${index}` }, content: [{ type: "text", text: "y".repeat(400) }] } });
+		extraNodes.push(index);
+	}
+	const { captured } = mountDecision(
+		{ preset: "auto-review", maxStateChars: 5000, decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
+		typesafeAnswers(0.99, "high", "exfiltration")
+	);
+	const request = requestFor(makeAgent(extra, extraNodes));
+	check("decision: truncated high-risk denial still rejects", await captured.handler(request, next), "rejected");
+	check("decision: truncated high-risk denial makes no chat call", captured.streamOptions.length, 0);
+	const mailed = globalThis[Symbol.for("auto-review-ww.denials")]?.get(`${request.agent.session.id}:write`) ?? "";
+	checkThat("decision: truncated high-risk denial keeps the hard-prohibition reason", mailed.includes("no session authorization can cover"), mailed);
+}
+{
+	// The uncertainty band escalates to the chat reviewer instead of guessing.
+	const { captured, requests } = mountDecision(
+		{ preset: "auto-review", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
+		typesafeAnswers(0.55, "medium", "none")
+	);
+	check("decision: uncertain verdict escalates to the chat reviewer", await captured.handler(requestFor(), next), "allowed-once");
+	check("decision: escalation made the chat model call", captured.streamOptions.length, 1);
+	check("decision: escalation did not retry the decision API", requests.length, 1);
+}
+{
+	// `escalate: deny` turns uncertainty into a fail-closed denial.
+	const { captured } = mountDecision(
+		{ preset: "auto-review", escalate: "deny", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
+		typesafeAnswers(0.55, "medium", "none")
+	);
+	const request = requestFor();
+	check("decision: uncertain with escalate=deny -> rejected", await captured.handler(request, next), "rejected");
+	check("decision: uncertain with escalate=deny made no chat call", captured.streamOptions.length, 0);
+	const mailed = globalThis[Symbol.for("auto-review-ww.denials")]?.get(`${request.agent.session.id}:write`) ?? "";
+	checkThat("decision: uncertain denial explains the confidence gap", mailed.includes("not confident enough"), mailed);
+}
+{
+	// A failing decision service falls back to the chat reviewer by default.
+	const { captured, requests } = mountDecision(
+		{ preset: "auto-review", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
+		{ status: 503, body: { error: "upstream unavailable" } }
+	);
+	check("decision: service error falls back to the chat reviewer", await captured.handler(requestFor(), next), "allowed-once");
+	check("decision: service error escalated to one chat call", captured.streamOptions.length, 1);
+	checkThat("decision: service error is logged", captured.logs.some(([level, message]) => level === "warn" && message.includes("decision reviewer") && message.includes("503")), JSON.stringify(captured.logs));
+	check("decision: failed request was attempted once", requests.length, 1);
+}
+{
+	// `escalate: deny` turns a service failure into the documented outage path.
+	const { captured } = mountDecision(
+		{ preset: "auto-review", escalate: "deny", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
+		{ status: 500, body: { error: "boom" } }
+	);
+	const request = requestFor();
+	check("decision: service error with escalate=deny -> rejected", await captured.handler(request, next), "rejected");
+	const mailed = globalThis[Symbol.for("auto-review-ww.denials")]?.get(`${request.agent.session.id}:write`) ?? "";
+	checkThat("decision: outage reason reaches the tool-return mailbox", mailed.includes("reviewer outage"), mailed);
+}
+{
+	// A malformed answer envelope is a failure, not a verdict.
+	const { captured } = mountDecision(
+		{ preset: "auto-review", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
+		{ answers: { authorized: { type: "noul", noul: 0.9 } } }
+	);
+	check("decision: malformed answers fall back to the chat reviewer", await captured.handler(requestFor(), next), "allowed-once");
+	check("decision: malformed answers made the chat call", captured.streamOptions.length, 1);
+}
+{
+	// Mode auto without an API key keeps the chat reviewer and never calls out.
+	let called = 0;
+	const { captured } = mountDecision({ preset: "auto-review", mode: "auto", apiKey: "", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" }, () => {
+		called += 1;
+		return typesafeAnswers(0.95, "low", "none");
+	});
+	check("decision: mode auto without a key -> chat allow", await captured.handler(requestFor(), next), "allowed-once");
+	check("decision: mode auto without a key made no HTTP request", called, 0);
+	check("decision: mode auto without a key made the chat call", captured.streamOptions.length, 1);
+}
+{
+	// An invalid api id is reported at mount and degrades to the chat reviewer.
+	const captured = mount({ module, preset: "auto-review", config: { mode: "decision", decision: { api: "nope", apiKey: "k" } }, decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" });
+	checkThat("decision: unknown api id is reported", captured.logs.some(([level, message]) => level === "warn" && message.includes("is not one of")), JSON.stringify(captured.logs));
+	check("decision: unknown api id keeps the chat reviewer", await captured.handler(requestFor(), next), "allowed-once");
+}
+{
+	// Long history is shed from the oldest end to fit the state budget.
+	const extra = [];
+	const extraNodes = [];
+	for (let index = 2; index < 202; index += 1) {
+		extra.push({ seq: index, type: "user/message", data: { source: { kind: "user", rpcId: `r${index}` }, content: [{ type: "text", text: "x".repeat(400) }] } });
+		extraNodes.push(index);
+	}
+	const agent = makeAgent(extra, extraNodes);
+	const { captured, requests } = mountDecision(
+		{ preset: "auto-review", maxStateChars: 5000, decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
+		typesafeAnswers(0.96, "low", "none")
+	);
+	check("decision: truncated state escalates to the chat reviewer", await captured.handler(requestFor(agent), next), "allowed-once");
+	check("decision: truncation escalation made the chat call", captured.streamOptions.length, 1);
+	const state = requests[0].body.state;
+	checkThat("decision: state fits the character budget", JSON.stringify(state).length <= 5000, `chars=${JSON.stringify(state).length}`);
+	checkThat("decision: oldest history was shed", state.history.length < 100, `history=${state.history.length}`);
+	checkThat("decision: the pending action survives truncation", state.pending_action.name === "write", JSON.stringify(state.pending_action?.name));
+	const newest = state.history.at(-1);
+	checkThat("decision: the newest evidence survives truncation", JSON.stringify(newest).includes("xxxxxxxx"), JSON.stringify(newest).slice(0, 80));
+	const forced = mountDecision(
+		{ preset: "auto-review", maxStateChars: 5000, escalateOnTruncation: false, decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
+		typesafeAnswers(0.96, "low", "none")
+	);
+	check("decision: escalateOnTruncation=false keeps the decision verdict", await forced.captured.handler(requestFor(makeAgent(extra, extraNodes)), next), "allowed-once");
+	check("decision: escalateOnTruncation=false makes no chat call", forced.captured.streamOptions.length, 0);
+}
+{
+	// Every decision review is audited with its probability and escalation source.
+	const fs = await import("node:fs");
+	const os = await import("node:os");
+	const path = await import("node:path");
+	const logPath = path.join(os.tmpdir(), `auto-review-ww-decision-${process.pid}-${Date.now()}.log`);
+	process.env.AUTO_REVIEW_WW_LOG_FILE = logPath;
+	try {
+		const { captured } = mountDecision({ preset: "auto-review", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" }, typesafeAnswers(0.55, "medium", "none"));
+		await captured.handler(requestFor(), next);
+		const lines = fs.readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		const review = lines.find((line) => line.kind === "review");
+		check("decision audit: the escalated review is logged", review?.mode, "chat");
+		check("decision audit: the escalation source is logged", review?.escalatedFrom, "decision-uncertain");
+		check("decision audit: the decision probability is logged", review?.decisionProbability, 0.55);
+		checkThat("decision audit: the deferral is logged", lines.some((line) => line.kind === "decision-defer" && line.probability === 0.55), JSON.stringify(lines.map((line) => line.kind)));
+	} finally {
+		delete process.env.AUTO_REVIEW_WW_LOG_FILE;
+		try { fs.rmSync(logPath, { force: true }); } catch {}
+	}
+}
+
+{
+	// Tooling entry point: the same transport, usable outside an approval flow.
+	const requests = [];
+	const verdict = await module.probeDecisionModel({
+		cwd: "D:\\proj",
+		projectInstructions: [],
+		history: [],
+		action: { mode: "native", name: "write", arguments: { file_path: "C:\\outside\\target.txt" } }
+	}, {
+		mode: "decision",
+		decision: { api: "typesafe-system-one", apiKey: "test-key", fetch: mockFetch(typesafeAnswers(0.97, "low", "none"), { requests }) }
+	});
+	check("probe: returns the decision verdict", verdict.kind, "allow");
+	check("probe: reports the calibrated probability", verdict.probability, 0.97);
+	check("probe: went through the same endpoint", requests[0].url, "https://api.typesafe.ai/v1/systemone");
+	let probeFailed = false;
+	try {
+		await module.probeDecisionModel({ cwd: "x", projectInstructions: [], history: [], action: {} }, { mode: "decision", decision: { api: "typesafe-system-one", apiKey: "" } });
+	} catch {
+		probeFailed = true;
+	}
+	check("probe: an unconfigured probe fails loudly", probeFailed, true);
 }
 
 console.log(failures === 0 ? "\nALL dsh-auto-review-ww CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);

@@ -23,6 +23,22 @@
 - insert:
     - id: auto-review-ww
       name: dsh-auto-review-ww
+      # Optional decision-model reviewer (see README). Uncomment to enable; the
+      # default `auto` mode needs an API key in the environment, so an existing
+      # installation keeps the chat reviewer until one is configured.
+      # config:
+      #   mode: auto                    # auto | chat | decision
+      #   decision:
+      #     api: typesafe-system-one    # typesafe-system-one | openai-decisions
+      #     model: jev-latest           # default: jev-latest / gpt-6-luna
+      #     apiKeyEnv: TYPESAFE_API_KEY # or OPENAI_API_KEY
+      #     allowThreshold: 0.85
+      #     denyThreshold: 0.2
+      #     escalate: chat              # chat | deny
+      #     confirmDenials: true        # medium denials get the chat reviewer's reason
+      #     escalateOnTruncation: true  # a shed-history verdict is not trusted
+      #     maxStateChars: 90000        # Jev default; GPT-6 Luna defaults to 600000
+      #     timeoutMs: 20000
 # A patch replaces the targeted row's whole `config`, so every shipped preset is
 # restated here alongside the new one.
 - id: permission
