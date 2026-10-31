@@ -108,9 +108,8 @@ different services:
 
 Both are far cheaper per review than a reasoning model (Jev is listed at $42 per
 billion input tokens and GPT-6 Luna at $0.10 per million — roughly $0.0006 and $0.0015
-for a 15k-token review), so the decision reviewer runs first and escalates only what it
-cannot settle. In practice the cheap path covers allows; a medium denial pays one chat
-review, which is exactly where a real reason matters.
+for a 15k-token review), and decision mode is built to stay inside that cost: **no chat
+call happens unless you turn one of the opt-in upgrades below on**.
 
 ### How it decides
 
@@ -129,18 +128,24 @@ invariant of the chat reviewer:
 
 - `high` risk always denies, even at a 99 % authorization probability;
 - an allow is only `low` or `medium`; a denial is only `medium` or `high`;
-- a probability between the deny and allow thresholds is **never** an allow — it
-  escalates to the chat reviewer (or fails closed, see `escalate`).
+- a probability between the deny and allow thresholds is **never** an allow — it fails
+  closed (or escalates, if you opt into that below).
 
-### The two weaknesses of decision models, handled
+### Trade-offs you choose (all off by default)
 
-Decision models were not built to replace a reviewer, and the two real limits are
-mitigated in code rather than left to the prompt:
+Decision mode is bought for its cost, so it never calls the chat model by default: an
+uncertain verdict, a truncated state, a service failure and a `medium` denial are all
+decided locally, for the price of the decision call alone. Each quality upgrade is a
+separate, explicit opt-in — enable only the axes you are willing to pay for:
 
-| Weakness | Mitigation |
-| --- | --- |
-| **Less context** (Jev: 64k per request, 32k per question) | the state is budgeted and the oldest history is shed first; if anything had to be shed, the verdict is *not* trusted — the call goes to the chat reviewer, which reads the full session (`escalateOnTruncation`, default on) |
-| **Cannot explain a denial** | a classifier can pick an objection category but cannot argue it, so a `medium` denial is confirmed by the chat reviewer and the agent receives its substantive reason (`confirmDenials`, default on); the chat reviewer can also override a wrong cheap denial, while a `high` denial stays final and is never overridden |
+| Switch | Default | What it buys | What it costs |
+| --- | --- | --- | --- |
+| `escalate: chat` | `deny` | an uncertain verdict or a decision-service failure is re-reviewed instead of failing closed | one chat review per uncertain or failed call |
+| `confirmDenials: true` | `false` | a `medium` denial gets a substantive reason, and a wrong cheap denial can be overridden | one chat review per `medium` denial |
+| `escalateOnTruncation: true` | `false` | when history had to be shed, the full-context reviewer decides instead of the classifier | one chat review per truncated state |
+
+The trade-off is yours: all off is the cheapest path; turn on only what matters for your
+workload. `high` risk always denies and is never overridden, whatever the switches say.
 
 ### Configuration
 
@@ -159,18 +164,19 @@ Add a `config` block to the plugin row in this package's `cordis.patch.yml`
           apiKeyEnv: TYPESAFE_API_KEY # or OPENAI_API_KEY
           allowThreshold: 0.85        # allow at or above this probability
           denyThreshold: 0.20         # deny at or below this probability
-          escalate: chat              # chat | deny (what an uncertain verdict does)
-          confirmDenials: true        # medium denials get the chat reviewer's reason
-          escalateOnTruncation: true  # a shed-history verdict is not trusted
+          escalate: deny             # deny: no chat spend on uncertainty (default)
+                                     # chat: re-review uncertain/failed calls
+          confirmDenials: false     # true: chat reviewer writes medium denial reasons
+          escalateOnTruncation: false  # true: shed-history verdicts go to the chat reviewer
           maxStateChars: 90000        # state budget (Jev); GPT-6 Luna defaults to 600000
-          timeoutMs: 20000            # decision call timeout, before escalation
+          timeoutMs: 20000            # decision call timeout
 ```
 
-`mode: chat` is the original reviewer, unchanged and still the default. `mode: auto` uses the decision reviewer only when an API key is present,
-so an existing installation keeps its current behavior until a key is configured.
-`mode: decision` makes the decision model mandatory and logs a configuration warning
-when the key is missing. API keys are never stored in this repo: set them in the
-environment (`TYPESAFE_API_KEY` / `OPENAI_API_KEY`, or `AUTO_REVIEW_WW_DECISION_API_KEY`).
+`mode: chat` is the original reviewer, unchanged and still the default. `mode: auto`
+uses the decision reviewer only when an API key is present, and `mode: decision` makes
+it mandatory (logging a configuration warning when the key is missing). API keys are
+never stored in this repo: set them in the environment (`TYPESAFE_API_KEY` /
+`OPENAI_API_KEY`, or `AUTO_REVIEW_WW_DECISION_API_KEY`).
 
 Other environment overrides: `AUTO_REVIEW_WW_MODE`, `AUTO_REVIEW_WW_DECISION_API`,
 `AUTO_REVIEW_WW_DECISION_MODEL`, `AUTO_REVIEW_WW_DECISION_BASE_URL`,
@@ -196,18 +202,18 @@ it with real escalations.
 ### Failure and limits
 
 - A decision call that fails (network, HTTP error, malformed answer envelope) is logged
-  as `decision-failure` and escalated to the chat reviewer; with `escalate: deny` it
-  takes the documented fail-closed outage path instead. Aborts are never mistaken for
-  failures.
+  as `decision-failure`. By default it fails closed as a reviewer outage; with
+  `escalate: chat` it is re-reviewed by the chat model instead. Aborts are never
+  mistaken for failures.
 - Decision models have smaller contexts than chat models (Jev: 64k per request, 32k per
   question). The state is budgeted by `maxStateChars` (default 90,000 characters ≈ 27k
   tokens for Jev, 600,000 for GPT-6 Luna) and the **oldest** history entries are shed
   first; the drop count is recorded in `reviewer.log`. Project instructions and the
-  pending action are never dropped. If anything was shed, the chat reviewer decides
-  instead (`escalateOnTruncation`), so a partial-context verdict is never trusted.
-- The denial reason is a category text plus a probability, not a bespoke sentence. That
-  is why a `medium` denial is confirmed by the chat reviewer by default
-  (`confirmDenials`); set it to `false` for the cheapest possible path.
+  pending action are never dropped. A shed-history verdict stands by default; enable
+  `escalateOnTruncation` to have the full-context reviewer decide instead.
+- The denial reason is a category text plus a probability, not a bespoke sentence.
+  Enable `confirmDenials` if you want the chat reviewer to supply (and confirm) the
+  reason for `medium` denials; leave it off for the cheapest possible path.
 - OpenAI's Decisions endpoint needs a real API key; "Sign in with ChatGPT" OAuth tokens
   are rejected by that route. Decision models also ignore `temperature`.
 
@@ -280,7 +286,7 @@ context channel.
 node selftest.mjs
 ```
 
-One hundred twelve checks cover decision mapping, escalation gating, signal integrity,
+One hundred nineteen checks cover decision mapping, escalation gating, signal integrity,
 card-answer retention, reason publication, fail-closed behavior, unload semantics,
 both decision-model wire protocols — URL, auth header, `noul`/`predicate` question shape,
 JSON-text state, state budget with oldest-history shedding, threshold policy, escalation,

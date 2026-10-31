@@ -428,10 +428,26 @@ const next = async () => "NEXT";
 	check("decision (OpenAI): confirmation off makes no chat call", captured.streamOptions.length, 0);
 }
 {
-	// Flaw 2 (no prose reason): a medium denial is confirmed by the chat reviewer,
-	// whose substantive objection is what the agent receives.
+	// Decision mode is bought for its cost: by default no path reaches the chat
+	// model. Deny, uncertainty and service failure are all decided locally.
+	const denied = mountDecision({ preset: "auto-review" }, typesafeAnswers(0.05, "medium", "unauthorized"));
+	check("decision: default confident deny -> rejected", await denied.captured.handler(requestFor(), next), "rejected");
+	check("decision: default confident deny makes zero chat calls", denied.captured.streamOptions.length, 0);
+	const uncertain = mountDecision({ preset: "auto-review" }, typesafeAnswers(0.55, "medium", "none"));
+	const uncertainRequest = requestFor();
+	check("decision: default uncertain verdict fails closed", await uncertain.captured.handler(uncertainRequest, next), "rejected");
+	check("decision: default uncertain verdict makes zero chat calls", uncertain.captured.streamOptions.length, 0);
+	const uncertainMailed = globalThis[Symbol.for("auto-review-ww.denials")]?.get(`${uncertainRequest.agent.session.id}:write`) ?? "";
+	checkThat("decision: default uncertain denial explains the confidence gap", uncertainMailed.includes("not confident enough"), uncertainMailed);
+	const outage = mountDecision({ preset: "auto-review" }, { status: 500, body: {} });
+	check("decision: default service error fails closed", await outage.captured.handler(requestFor(), next), "rejected");
+	check("decision: default service error makes zero chat calls", outage.captured.streamOptions.length, 0);
+}
+{
+	// Flaw 2 (no prose reason) is an opt-in: only confirmDenials=true pays a chat
+	// review for the reason.
 	const { captured } = mountDecision(
-		{ preset: "auto-review", decision: "{\"risk\":\"medium\",\"decision\":\"deny\",\"reason\":\"the chat reviewer found the target outside the workspace and no instruction authorizes that path\"}" },
+		{ preset: "auto-review", confirmDenials: true, decision: "{\"risk\":\"medium\",\"decision\":\"deny\",\"reason\":\"the chat reviewer found the target outside the workspace and no instruction authorizes that path\"}" },
 		typesafeAnswers(0.08, "medium", "unauthorized")
 	);
 	const request = requestFor();
@@ -443,7 +459,7 @@ const next = async () => "NEXT";
 {
 	// The stronger reviewer may override a wrong cheap denial.
 	const { captured } = mountDecision(
-		{ preset: "auto-review", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
+		{ preset: "auto-review", confirmDenials: true, decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
 		typesafeAnswers(0.08, "medium", "scope")
 	);
 	check("decision: chat reviewer overrides a wrong cheap denial", await captured.handler(requestFor(), next), "allowed-once");
@@ -452,7 +468,7 @@ const next = async () => "NEXT";
 {
 	// If confirmation fails, the cheap denial stands (fail closed) with its reason.
 	const { captured } = mountDecision(
-		{ preset: "auto-review", streamThrows: true, decision: "{\"risk\":\"medium\",\"decision\":\"deny\"}" },
+		{ preset: "auto-review", confirmDenials: true, streamThrows: true, decision: "{\"risk\":\"medium\",\"decision\":\"deny\"}" },
 		typesafeAnswers(0.08, "medium", "scope")
 	);
 	const request = requestFor();
@@ -481,7 +497,7 @@ const next = async () => "NEXT";
 		extraNodes.push(index);
 	}
 	const { captured } = mountDecision(
-		{ preset: "auto-review", maxStateChars: 5000, decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
+		{ preset: "auto-review", maxStateChars: 5000, escalateOnTruncation: true, decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
 		typesafeAnswers(0.99, "high", "exfiltration")
 	);
 	const request = requestFor(makeAgent(extra, extraNodes));
@@ -491,9 +507,10 @@ const next = async () => "NEXT";
 	checkThat("decision: truncated high-risk denial keeps the hard-prohibition reason", mailed.includes("no session authorization can cover"), mailed);
 }
 {
-	// The uncertainty band escalates to the chat reviewer instead of guessing.
+	// Flaw 1 (less context) is an opt-in: escalateOnTruncation=true hands a
+	// shed-history verdict to the full-context reviewer.
 	const { captured, requests } = mountDecision(
-		{ preset: "auto-review", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
+		{ preset: "auto-review", escalate: "chat", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
 		typesafeAnswers(0.55, "medium", "none")
 	);
 	check("decision: uncertain verdict escalates to the chat reviewer", await captured.handler(requestFor(), next), "allowed-once");
@@ -513,9 +530,9 @@ const next = async () => "NEXT";
 	checkThat("decision: uncertain denial explains the confidence gap", mailed.includes("not confident enough"), mailed);
 }
 {
-	// A failing decision service falls back to the chat reviewer by default.
+	// escalate: chat turns a decision-service failure into a chat review.
 	const { captured, requests } = mountDecision(
-		{ preset: "auto-review", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
+		{ preset: "auto-review", escalate: "chat", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
 		{ status: 503, body: { error: "upstream unavailable" } }
 	);
 	check("decision: service error falls back to the chat reviewer", await captured.handler(requestFor(), next), "allowed-once");
@@ -537,7 +554,7 @@ const next = async () => "NEXT";
 {
 	// A malformed answer envelope is a failure, not a verdict.
 	const { captured } = mountDecision(
-		{ preset: "auto-review", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
+		{ preset: "auto-review", escalate: "chat", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
 		{ answers: { authorized: { type: "noul", noul: 0.9 } } }
 	);
 	check("decision: malformed answers fall back to the chat reviewer", await captured.handler(requestFor(), next), "allowed-once");
@@ -570,7 +587,7 @@ const next = async () => "NEXT";
 	}
 	const agent = makeAgent(extra, extraNodes);
 	const { captured, requests } = mountDecision(
-		{ preset: "auto-review", maxStateChars: 5000, decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
+		{ preset: "auto-review", maxStateChars: 5000, escalateOnTruncation: true, decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" },
 		typesafeAnswers(0.96, "low", "none")
 	);
 	check("decision: truncated state escalates to the chat reviewer", await captured.handler(requestFor(agent), next), "allowed-once");
@@ -596,7 +613,7 @@ const next = async () => "NEXT";
 	const logPath = path.join(os.tmpdir(), `auto-review-ww-decision-${process.pid}-${Date.now()}.log`);
 	process.env.AUTO_REVIEW_WW_LOG_FILE = logPath;
 	try {
-		const { captured } = mountDecision({ preset: "auto-review", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" }, typesafeAnswers(0.55, "medium", "none"));
+		const { captured } = mountDecision({ preset: "auto-review", escalate: "chat", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" }, typesafeAnswers(0.55, "medium", "none"));
 		await captured.handler(requestFor(), next);
 		const lines = fs.readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
 		const review = lines.find((line) => line.kind === "review");

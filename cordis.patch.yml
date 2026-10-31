@@ -34,9 +34,9 @@
       #     apiKeyEnv: TYPESAFE_API_KEY # or OPENAI_API_KEY
       #     allowThreshold: 0.85
       #     denyThreshold: 0.2
-      #     escalate: chat              # chat | deny
-      #     confirmDenials: true        # medium denials get the chat reviewer's reason
-      #     escalateOnTruncation: true  # a shed-history verdict is not trusted
+      #     escalate: deny              # deny = no chat spend on uncertainty (default)
+      #     confirmDenials: false       # true: chat reviewer writes medium denial reasons
+      #     escalateOnTruncation: false # true: shed-history verdicts go to the chat reviewer
       #     maxStateChars: 90000        # Jev default; GPT-6 Luna defaults to 600000
       #     timeoutMs: 20000
 # A patch replaces the targeted row's whole `config`, so every shipped preset is

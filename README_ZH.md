@@ -102,9 +102,8 @@ JSON 协议作答 `{"risk":"low|medium|high","decision":"allow|deny","reason":".
 | `openai-decisions` | [OpenAI Decisions](https://developers.openai.com/api/docs/guides/decisions)(GPT-6 Luna) | `POST <baseUrl>/decisions` | `type: "predicate"` |
 
 两者单次评审成本都远低于推理模型(目录价:Jev $42 / 十亿输入 token,GPT-6 Luna
-$0.10 / 百万 —— 一次 1.5 万 token 的评审分别约 $0.0006 与 $0.0015),因此决策审查器
-先跑,只把它定不下来的调用升级给聊天审查器。实际效果是:放行走廉价路径;`medium`
-拒绝会付一次聊天评审 —— 而那正是"理由"最要紧的地方。
+$0.10 / 百万 —— 一次 1.5 万 token 的评审分别约 $0.0006 与 $0.0015),而决策模式就是
+为了守住这个成本:**除非你主动打开下面的升级开关,否则一次聊天调用都不会发生**。
 
 ### 它如何判断
 
@@ -122,18 +121,23 @@ $0.10 / 百万 —— 一次 1.5 万 token 的评审分别约 $0.0006 与 $0.001
 
 - `high` 风险永远拒绝,即使授权概率高达 99%;
 - allow 只允许 `low`/`medium`,deny 只允许 `medium`/`high`;
-- 概率落在 deny 与 allow 两个阈值之间时**绝不**放行 —— 升级给聊天审查器(或
-  按 `escalate` 配置 fail closed)。
+- 概率落在 deny 与 allow 两个阈值之间时**绝不**放行 —— 默认 fail closed(除非你
+  打开下面的升级开关)。
 
-### 决策模型的两个硬伤,用机制兜底
+### 取舍开关(默认全关)
 
-决策模型并不是为取代审查器而生的,它的两个真实局限在代码里兜底,而不是只写在
-提示词里:
+决策模式就是图便宜,所以默认**不调用聊天模型**:不确定裁决、状态被裁剪、服务故障、
+`medium` 拒绝,全部在本地决定,只花决策调用本身的钱。每一项质量升级都是显式选项,
+只为你在意的那一项付费:
 
-| 硬伤 | 兜底 |
-| --- | --- |
-| **上下文小**(Jev:每请求 64k、每问题 32k) | 状态有预算,超出时先丢弃最旧历史;只要发生过丢弃,该裁决就**不被信任** —— 转交能读完整会话的聊天审查器(`escalateOnTruncation`,默认开) |
-| **不会说明拒绝理由** | 分类器只能选一个反对类别、写不出论证,因此 `medium` 拒绝会由聊天审查器复核,agent 收到的是它给出的实质理由(`confirmDenials`,默认开);聊天审查器也能推翻错误的廉价拒绝,而 `high` 拒绝永远终局、不可推翻 |
+| 开关 | 默认 | 买到什么 | 代价 |
+| --- | --- | --- | --- |
+| `escalate: chat` | `deny` | 不确定裁决或决策服务故障改由聊天模型复核,而不是 fail closed | 每次不确定/失败调用一次聊天评审 |
+| `confirmDenials: true` | `false` | `medium` 拒绝获得实质理由,错误的廉价拒绝可被推翻 | 每次 `medium` 拒绝一次聊天评审 |
+| `escalateOnTruncation: true` | `false` | 历史被裁剪过时,改由能读完整上下文的审查器裁决 | 每次裁剪状态一次聊天评审 |
+
+取舍权在你:全关最便宜;只打开与你工作负载相关的那一项。无论开关如何,`high` 风险
+永远拒绝且不可被推翻。
 
 ### 配置
 
@@ -152,11 +156,12 @@ $0.10 / 百万 —— 一次 1.5 万 token 的评审分别约 $0.0006 与 $0.001
           apiKeyEnv: TYPESAFE_API_KEY # 或 OPENAI_API_KEY
           allowThreshold: 0.85        # 概率达到该值才放行
           denyThreshold: 0.20         # 概率低于该值直接拒绝
-          escalate: chat              # chat | deny(不确定裁决的处置)
-          confirmDenials: true        # medium 拒绝由聊天审查器给出理由
-          escalateOnTruncation: true  # 发生过历史丢弃的裁决不被信任
+          escalate: deny              # deny:不确定时不再花钱(默认)
+                                      # chat:不确定/失败改由聊天复核
+          confirmDenials: false       # true:medium 拒绝由聊天审查器给出理由
+          escalateOnTruncation: false # true:被裁剪过历史时改由聊天审查器裁决
           maxStateChars: 90000        # 状态预算(Jev);GPT-6 Luna 默认 600000
-          timeoutMs: 20000            # 决策调用超时,之后升级
+          timeoutMs: 20000            # 决策调用超时
 ```
 
 `mode: chat` 就是原始的聊天审查器,保持完全不变且仍是默认。`mode: auto` 只有在存在
@@ -187,16 +192,16 @@ node tools/probe-decision.mjs --task "删除过期的构建缓存"
 
 ### 故障与局限
 
-- 决策调用失败(网络、HTTP 错误、答案信封格式错误)会记入 `decision-failure` 并升级
-  给聊天审查器;若 `escalate: deny`,则走既有的 fail-closed 故障路径。用户信号的中止
+- 决策调用失败(网络、HTTP 错误、答案信封格式错误)会记入 `decision-failure`。默认
+  按审查器故障 fail closed;只有 `escalate: chat` 才改由聊天模型复核。用户信号的中止
   永远不会被误判为失败。
 - 决策模型的上下文比聊天模型小(Jev:每请求 64k、每问题 32k)。状态由
   `maxStateChars` 限定预算(默认:Jev 90,000 字符 ≈ 27k token;GPT-6 Luna 600,000),
   超出时**先丢弃最旧**的历史,丢弃条数写入 `reviewer.log`;项目指令与待审动作永不
-  丢弃。只要发生过丢弃,就改由聊天审查器裁决(`escalateOnTruncation`),部分上下文的
-  裁决永不被信任。
-- 拒绝理由由"分类文本 + 概率"组成,不是定制长句。因此 `medium` 拒绝默认由聊天审查器
-  复核并给出理由(`confirmDenials`);想要最省成本,可把它设为 `false`。
+  丢弃。被裁剪过的裁决默认仍然有效;想让它改由完整上下文的聊天审查器裁决,打开
+  `escalateOnTruncation`。
+- 拒绝理由由"分类文本 + 概率"组成,不是定制长句。想要聊天审查器为 `medium` 拒绝
+  提供(并复核)理由,打开 `confirmDenials`;想要最省成本就保持关闭。
 - OpenAI 的 Decisions 端点需要真实 API key,"Sign in with ChatGPT" 的 OAuth 令牌会被
   该路由拒绝。决策模型同样忽略 `temperature`。
 
@@ -258,7 +263,7 @@ Harness 升级后需要重新应用。不打补丁时,拒绝原因依然通过�
 node selftest.mjs
 ```
 
-一百一十二项检查覆盖:决策映射、提权门控、信号完整性、卡片答复保留、原因发布、
+一百一十九项检查覆盖:决策映射、提权门控、信号完整性、卡片答复保留、原因发布、
 fail-closed 行为、卸载语义、两种决策模型协议 —— URL、鉴权头、
 `noul`/`predicate` 问题形状、JSON 文本状态、带"丢弃最旧历史"的状态预算、阈值策略、
 升级、拒绝复核与推翻、截断升级 —— 全部由录制式 `fetch` 驱动,不触网,以及探针工具。
