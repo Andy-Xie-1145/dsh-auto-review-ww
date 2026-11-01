@@ -30,17 +30,19 @@ any tool call
 > state, this package owns the `auto-review` preset and its reviewer, and neither
 > registers the other's identity.
 
-## Why not the official Auto review?
+## Why ours fits better
 
-The shipped experimental Auto review runs on a `danger-full-access` base and its review
-is part of every request. This plugin takes the opposite trade:
+The shipped experimental Auto review and this plugin optimize for different things: the
+official preset stays close to the agent loop and accepts that a refusal is handed to a
+person, while this plugin trades a little review latency for unattended completion. Both
+are reasonable designs; here is the comparison:
 
 | | Official Auto review | dsh-auto-review-ww |
 | --- | --- | --- |
 | Sandbox base | `danger-full-access` (no sandbox) | `workspace-write` (real sandbox) |
 | Review trigger | every command | escalation-only |
 | Token overhead | one review per request | **0** for in-sandbox work; one trimmed snapshot per escalation |
-| Unattended one-shot runs | yes, but everything runs unsandboxed | yes, and risky actions still meet a reviewer |
+| Unattended one-shot runs | **no** — a refused review falls back to human approval, so the run stops and waits for a person | **yes** — a refusal is final, its reason goes back to the agent, and the run continues |
 | Reviewer failure | fails the request | fail closed, **reason published to the agent** |
 | Preset source | reserved `auto` (official row) | plain row config `auto-review`, no private constants |
 | Upgrade resilience | tied to the official row | nothing touches host private constants; a plugin crash leaves the preset selectable (degrades to human approval) |
