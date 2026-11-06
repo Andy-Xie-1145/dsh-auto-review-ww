@@ -219,31 +219,27 @@ node tools/probe-decision.mjs --task "删除过期的构建缓存"
   完整证据文件。
 ## 兼容性说明
 
-- 声明兼容区间:`0.2.0-rc.2 || >=0.2.1-rc.0 <0.4.0-0`(覆盖 0.2.0-rc.2、0.2.1 全部 rc 与正式版直到 0.2.5+/0.3 线;已用 node-semver 在 strict 与 includePrerelease 两种模式下验证)。插件不声明任何宿主私有常量、不导入宿主模块,只要权限行配置形状不变即可工作;升级宿主后请跑一遍 `node selftest.mjs`。可选沙箱补丁按内容精确匹配自守卫,宿主变更时拒绝盲改。
+- 声明兼容区间:`0.2.0-rc.2 || >=0.2.1-rc.0 <0.4.0-0`(覆盖 0.2.0-rc.2、0.2.1 全部 rc 与正式版直到 0.2.5+/0.3 线;已用 node-semver 在 strict 与 includePrerelease 两种模式下验证)。插件不声明任何宿主私有常量、不导入宿主模块,只要权限行配置形状不变即可工作;升级宿主后请跑一遍 `node selftest.mjs`。
 - 官方 `@deepseek-ai/dsh-experimental-auto-review` 行保持**启用**。选择器里会出现两个
   预设:官方 `auto`(带 EXP 徽章)与本包的 `auto-review`(普通条目 —— 客户端只装饰
   `auto`)。
 - 零运行时依赖:宿主辅助函数全部内联,`link:`/junction 安装方式解析干净。
 
-## 可选:把拒绝原因写进工具返回(实验性宿主补丁)
+## 把拒绝原因写进工具返回(内置,零配置)
 
 宿主在 `@deepseek-ai/dsh-sandbox` 内部用固定模板拼装提权拒绝文本("the user
-rejected escalating this ..."),而审批协议本身不携带理由字段 —— 插件无法凭自己
-改写这句话。因此本仓库提供一个可选的单行宿主补丁:
-
-```sh
-node tools/patch-sandbox-rejection.mjs            # 应用(幂等)
-node tools/patch-sandbox-rejection.mjs --revert   # 恢复原始行
-```
-
-打补丁后,本审查器的拒绝会读作:
+rejected escalating this ..."),而审批协议本身不携带理由字段。本插件通过**受支持的
+宿主 seam**(`tools/post-execute` 监听器)改写这段文本,本审查器的拒绝会读作:
 
 ```text
-the Auto Reviewer denied escalating this <subject> to "<mode>": <reason> ...
+Error: the Auto Reviewer denied escalating this <subject> to "<mode>": <reason> (it stays denied; address the stated reason or ask the human)
 ```
 
-未打补丁的宿主完全不受影响(注册表根本不会被读取),无人值守语义不变;每次
-Harness 升级后需要重新应用。不打补丁时,拒绝原因依然通过上下文通道到达 agent。
+改写只在三种条件同时成立时发生:结果是错误、文本是宿主原始拒绝模板、且本插件恰好
+记录了对该会话+工具的拒绝。真正的人类拒绝、取消、以及任何其他错误都原样放行。
+**不修改任何宿主文件,Harness 升级或重装后无需任何操作。**(早期版本用单行宿主补丁
+`tools/patch-sandbox-rejection.mjs` 实现,但 node_modules 的任何重写都会把它抹掉;
+现已废弃,仅为仍带补丁的宿主保留 `--revert`。)
 ## 生产教训(每条都是一个回归测试)
 
 1. **永远不要冻结 `AbortSignal`。** `deepFreeze(options)` 曾把组合信号一起冻结,下游
@@ -257,6 +253,9 @@ Harness 升级后需要重新应用。不打补丁时,拒绝原因依然通过�
    以 `human-instruction` 角色保留 —— 卡片里做的决定与打字授权同等有效。
 5. **永远不要禁用官方 auto-review 行。** `auto` 是保留字;持久化在 `auto` 上的会话
    没有它的提供者就无法冷打开,界面会显示永久不可用。
+6. **永远不要依赖宿主文件补丁。** npm 对 `@deepseek-ai/dsh` 的一次**同版本**修复/重装
+   就把 node_modules 恢复成官方内容、抹掉补丁 —— 没有版本变化、没有任何预警。需要
+   跨升级存活的东西必须走受支持的插件 seam;工具返回改写现已如此(见上)。
 
 ## 自测
 
@@ -264,10 +263,11 @@ Harness 升级后需要重新应用。不打补丁时,拒绝原因依然通过�
 node selftest.mjs
 ```
 
-一百一十九项检查覆盖:决策映射、提权门控、信号完整性、卡片答复保留、原因发布、
+一百二十九项检查覆盖:决策映射、提权门控、信号完整性、卡片答复保留、原因发布、
 fail-closed 行为、卸载语义、两种决策模型协议 —— URL、鉴权头、
 `noul`/`predicate` 问题形状、JSON 文本状态、带"丢弃最旧历史"的状态预算、阈值策略、
-升级、拒绝复核与推翻、截断升级 —— 全部由录制式 `fetch` 驱动,不触网,以及探针工具。
+升级、拒绝复核与推翻、截断升级 —— 全部由录制式 `fetch` 驱动,不触网,以及探针工具
+与工具返回改写(审查器拒绝被改写、人类拒绝与其余结果原样放行)。
 
 ## 许可证
 

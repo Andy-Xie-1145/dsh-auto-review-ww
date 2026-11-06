@@ -1,7 +1,13 @@
 #!/usr/bin/env node
-// Optional, experimental host patch for dsh-auto-review-ww.
+// DEPRECATED — kept only for --revert on hosts that still carry the patch.
 //
-// WHAT IT CHANGES — exactly one line inside the installed
+// Since v1.2.0 the denial reason reaches the tool return through a supported
+// host seam (a `tools/post-execute` listener inside the plugin itself), which
+// needs no host file modification and survives every Harness upgrade or
+// reinstall. Do not apply this patch anymore; if a host still has it, run
+// `--revert` once and rely on the built-in mechanism.
+//
+// WHAT IT CHANGED — exactly one line inside the installed
 //   @deepseek-ai/dsh-sandbox/lib/index.js
 // The host composes an escalation rejection as a fixed template that says
 // "the user rejected escalating this ...", which is wrong when an automatic

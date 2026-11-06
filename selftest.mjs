@@ -28,6 +28,10 @@ async function* stubStream(text) {
 	yield { type: "finish", reason: { kind: "stop" } };
 }
 
+/** Unique session identity counter: the plugin keys registry state by session id,
+ * so every agent must get its own to keep cases isolated. */
+let sessionCounter = 0;
+
 /** A session with one human instruction and one pending escalated write. */
 function makeAgent(extraEvents = [], extraNodes = []) { // unique session identity per call, so the plugin's WeakMap state cannot leak between cases
 	const events = [
@@ -51,6 +55,7 @@ function makeAgent(extraEvents = [], extraNodes = []) { // unique session identi
 		...extraEvents
 	];
 	const session = {
+		id: `session-${++sessionCounter}`,
 		header: { cwd: "D:\\proj", origin: "local" },
 		isOwnSeq: () => true,
 		snapshotEvents: () => events,
@@ -68,6 +73,8 @@ function mount(options) {
 	const captured = {
 		handler: undefined,
 		onOptions: undefined,
+		postExecute: undefined,
+		postExecuteOptions: undefined,
 		streamOptions: [],
 		logs: [],
 		disposers: [],
@@ -93,6 +100,10 @@ function mount(options) {
 			if (event === "approval/request") {
 				captured.handler = handler;
 				captured.onOptions = onOptions;
+			}
+			if (event === "tools/post-execute") {
+				captured.postExecute = handler;
+				captured.postExecuteOptions = onOptions;
 			}
 			return () => {};
 		},
@@ -649,6 +660,55 @@ const next = async () => "NEXT";
 		probeFailed = true;
 	}
 	check("probe: an unconfigured probe fails loudly", probeFailed, true);
+}
+
+// --- tool-return rewrite via tools/post-execute (no host patch) -------------
+{
+	// A reviewer denial rewrites the stock "the user rejected" tool return into
+	// the Auto Reviewer's verdict with its reason. This is the upgrade-proof
+	// replacement for the host file patch.
+	const captured = mount({ module, preset: "auto-review", decision: "{\"risk\":\"medium\",\"decision\":\"deny\",\"reason\":\"the target is outside the workspace and no instruction covers that path\"}" });
+	const agent = makeAgent();
+	await captured.handler(requestFor(agent), next);
+	checkThat("rewrite listener is registered", typeof captured.postExecute === "function", String(captured.postExecute));
+	checkThat("rewrite listener is prepend+global", captured.postExecuteOptions?.prepend === true && captured.postExecuteOptions?.global === true, JSON.stringify(captured.postExecuteOptions));
+	const rejection = {
+		isError: true,
+		content: [{ type: "text", text: 'Error: the user rejected escalating this program to "danger-full-access"; it stays denied, so stop and explain instead of working around it' }],
+		error: { message: 'the user rejected escalating this program to "danger-full-access"; it stays denied, so stop and explain instead of working around it' }
+	};
+	const decision = await captured.postExecute({ agent, name: "write" }, rejection, async () => ({ kind: "passthrough" }));
+	check("rewrite decision is accept", decision?.kind, "accept");
+	const text = decision?.content?.[0]?.text ?? "";
+	checkThat("rewrite names the Auto Reviewer", text.includes("the Auto Reviewer denied escalating this program to \"danger-full-access\""), text);
+	checkThat("rewrite carries the reviewer's reason", text.includes("the target is outside the workspace and no instruction covers that path"), text);
+	checkThat("rewrite is audited to the host log", captured.logs.some(([level, message]) => level === "info" && message.includes("rewrote the rejection tool return")), JSON.stringify(captured.logs));
+}
+{
+	// A genuine human rejection (no recorded denial for this session+tool)
+	// keeps the stock text: the registry entry is exactly the discriminator.
+	const captured = mount({ module, preset: "auto-review", decision: "{\"risk\":\"low\",\"decision\":\"allow\"}" });
+	const stranger = makeAgent();
+	const rejection = {
+		isError: true,
+		content: [{ type: "text", text: 'Error: the user rejected escalating this program to "danger-full-access"; it stays denied, so stop and explain instead of working around it' }],
+		error: { message: "irrelevant" }
+	};
+	const decision = await captured.postExecute({ agent: stranger, name: "write" }, rejection, async () => ({ kind: "NEXT" }));
+	check("human rejection passes through", decision?.kind, "NEXT");
+}
+{
+	// Any other error text and any success result pass through untouched.
+	const captured = mount({ module, preset: "auto-review", decision: "{\"risk\":\"high\",\"decision\":\"deny\",\"reason\":\"r\"}" });
+	const agent = makeAgent();
+	await captured.handler(requestFor(agent), next);
+	const passthrough = async (result) => await captured.postExecute({ agent, name: "write" }, result, async () => ({ kind: "NEXT" }));
+	const otherError = { isError: true, content: [{ type: "text", text: "Error: command failed with exit code 1" }], error: { message: "command failed" } };
+	check("non-rejection error passes through", (await passthrough(otherError))?.kind, "NEXT");
+	const success = { isError: false, content: [{ type: "text", text: "done" }] };
+	check("success result passes through", (await passthrough(success))?.kind, "NEXT");
+	const cancelled = { isError: true, content: [{ type: "text", text: 'Error: approval for escalating to "danger-full-access" was cancelled' }], error: { message: "cancelled" } };
+	check("cancellation error passes through", (await passthrough(cancelled))?.kind, "NEXT");
 }
 
 console.log(failures === 0 ? "\nALL dsh-auto-review-ww CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);

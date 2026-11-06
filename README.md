@@ -235,35 +235,31 @@ it with real escalations.
   `AUTO_REVIEW_WW_DEBUG_LOG=<file>` for a complete evidence file.
 ## Compatibility notes
 
-- Declared host range: `0.2.0-rc.2 || >=0.2.1-rc.0 <0.4.0-0` (covers 0.2.0-rc.2, every 0.2.1-rc+/release through 0.2.5+ and the 0.3 line; validated with node-semver in both strict and includePrerelease modes).`n  The plugin declares no private host constants and no host imports, so any host that`n  keeps the permission-row config shape works; run `node selftest.mjs` after upgrading.`n  The optional sandbox patch self-guards by exact line match and refuses to patch a`n  changed host.
+- Declared host range: `0.2.0-rc.2 || >=0.2.1-rc.0 <0.4.0-0` (covers 0.2.0-rc.2, every 0.2.1-rc+/release through 0.2.5+ and the 0.3 line; validated with node-semver in both strict and includePrerelease modes).`n  The plugin declares no private host constants and no host imports, so any host that`n  keeps the permission-row config shape works; run `node selftest.mjs` after upgrading.
 - The official `@deepseek-ai/dsh-experimental-auto-review` row stays **enabled**. Two
   preset entries appear in the picker: the official `auto` (with the EXP badge) and this
   package's `auto-review` (plain entry — the client only decorates `auto`).
 - Zero runtime dependencies: all host helpers are inlined, so `link:`/junction installs
   resolve cleanly.
 
-## Optional: denial reason in the tool return (experimental host patch)
+## Denial reason in the tool return (built in, no setup)
 
 The host composes an escalation rejection inside `@deepseek-ai/dsh-sandbox` with a
 fixed template ("the user rejected escalating this ...") and the approval protocol
-carries no reason field, so a plugin cannot alter that text on its own. This repo
-therefore ships an optional, single-line host patch:
-
-```sh
-node tools/patch-sandbox-rejection.mjs            # apply (idempotent)
-node tools/patch-sandbox-rejection.mjs --revert   # restore the stock line
-```
-
-When patched, a rejection made by this reviewer reads:
+carries no reason field. This plugin rewrites that text through a supported host
+seam — a `tools/post-execute` listener — so a rejection made by this reviewer reads:
 
 ```text
-the Auto Reviewer denied escalating this <subject> to "<mode>": <reason> ...
+Error: the Auto Reviewer denied escalating this <subject> to "<mode>": <reason> (it stays denied; address the stated reason or ask the human)
 ```
 
-Unpatched hosts are unaffected (the registry is simply never read), unattended
-semantics are unchanged, and the patch must be re-applied after each Harness
-upgrade. Without the patch the reason still reaches the agent through the
-context channel.
+The rewrite fires only when the result is an error, its text is the stock rejection
+template, and this plugin recorded a denial for exactly that session and tool. A
+genuine human rejection, a cancellation, and every other error pass through with the
+host's original text. There is no host file to patch and nothing to redo after a
+Harness upgrade or reinstall. (Earlier versions did this with a one-line host patch,
+`tools/patch-sandbox-rejection.mjs`, which every `node_modules` rewrite wiped; it is
+now obsolete and kept only for `--revert` on hosts that still carry it.)
 ## Production lessons (each one is a regression test)
 
 1. **Never freeze an `AbortSignal`.** `deepFreeze(options)` used to freeze the composed
@@ -281,6 +277,10 @@ context channel.
 5. **Never disable the official auto-review row.** `auto` is reserved; sessions persisted
    on `auto` fail to cold-open without its provider, and the UI shows them permanently
    unavailable.
+6. **Never rely on host-file patches.** A same-version `npm` repair of `@deepseek-ai/dsh`
+   silently restored stock `node_modules` and wiped the patch — no version bump, no
+   warning. Anything that must survive upgrades has to ride a supported plugin seam;
+   the tool-return rewrite now does (see above).
 
 ## Self-test
 
@@ -288,12 +288,13 @@ context channel.
 node selftest.mjs
 ```
 
-One hundred nineteen checks cover decision mapping, escalation gating, signal integrity,
+One hundred twenty-nine checks cover decision mapping, escalation gating, signal integrity,
 card-answer retention, reason publication, fail-closed behavior, unload semantics,
 both decision-model wire protocols — URL, auth header, `noul`/`predicate` question shape,
 JSON-text state, state budget with oldest-history shedding, threshold policy, escalation,
 denial confirmation and override, truncation escalation — driven by a recording `fetch`
-instead of the network, and the probe tool.
+instead of the network, the probe tool, and the tool-return rewrite (reviewer denial
+rewritten, human rejection and every other result untouched).
 
 ## License
 
